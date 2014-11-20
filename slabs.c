@@ -24,18 +24,27 @@
 /* powers-of-N allocation structures */
 
 typedef struct {
+    /* item的大小 */
     unsigned int size;      /* sizes of items */
+    /* 每个slab可以容纳item的数目 */
     unsigned int perslab;   /* how many items per slab */
 
+    /* 空闲的item指针链表 */
     void *slots;           /* list of item ptrs */
+    /* 空闲链表的长度 */
     unsigned int sl_curr;   /* total free items in list */
 
+    /* 本层slabcalss已经分配slab数目 */
     unsigned int slabs;     /* how many slabs were allocated for this class */
 
+    /* 已经占用的slab链表 */
     void **slab_list;       /* array of slab pointers */
+    /* 已经占用的slab链表长度 */
     unsigned int list_size; /* size of prev array */
 
+    /* 如果killing>0, 表示正在踢出的slab */
     unsigned int killing;  /* index+1 of dying slab, or zero if none */
+    /* 已经使用的字节数 */
     size_t requested; /* The number of requested bytes */
 } slabclass_t;
 
@@ -100,6 +109,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 
     if (prealloc) {
         /* Allocate everything in a big chunk with malloc */
+        /* 预分配, 这个大小等同与mc允许使用的最大内存, 其他地方如果需要使用内存从这里分配 */
         mem_base = malloc(mem_limit);
         if (mem_base != NULL) {
             mem_current = mem_base;
@@ -114,6 +124,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 
     while (++i < POWER_LARGEST && size <= settings.item_size_max / factor) {
         /* Make sure items are always n-byte aligned */
+        /* size调整为8的整数倍, 较少取内存时需要地址对齐 */
         if (size % CHUNK_ALIGN_BYTES)
             size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
 
@@ -126,6 +137,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
         }
     }
 
+    /* 最后一层slabclass设置为允许的最大的item长度 */
     power_largest = i;
     slabclass[power_largest].size = settings.item_size_max;
     slabclass[power_largest].perslab = 1;
@@ -158,9 +170,11 @@ static void slabs_preallocate (const unsigned int maxslabs) {
        list.  if you really don't want this, you can rebuild without
        these three lines.  */
 
+    /* 给每个slabclass预分配一个slab */
     for (i = POWER_SMALLEST; i <= POWER_LARGEST; i++) {
         if (++prealloc > maxslabs)
             return;
+        /* 把slab拆分成free item, 分配到slabcalss */
         if (do_slabs_newslab(i) == 0) {
             fprintf(stderr, "Error while preallocating slab memory!\n"
                 "If using -L or other prealloc options, max memory must be "
@@ -183,6 +197,7 @@ static int grow_slab_list (const unsigned int id) {
     return 1;
 }
 
+/* slab转为free item列表 */
 static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     int x;
@@ -194,10 +209,16 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
 
 static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
+    /* reassign可以减少内部内存碎片 */
     int len = settings.slab_reassign ? settings.item_size_max
         : p->size * p->perslab;
     char *ptr;
 
+    /**
+     * mem_limit && mem_malloced + len > mem_limit && p->slabs > 0
+     * 内存分配超过最大限制, 而且p->slabs>0, 表示不是初始化时分配的。
+     * grow_slab_list, 如果slab_list数组的空间不够用，需要扩容
+     */ 
     if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0) ||
         (grow_slab_list(id) == 0) ||
         ((ptr = memory_allocate((size_t)len)) == 0)) {
@@ -207,6 +228,7 @@ static int do_slabs_newslab(const unsigned int id) {
     }
 
     memset(ptr, 0, (size_t)len);
+    /* slab 拆分为free item list */
     split_slab_page_into_freelist(ptr, id);
 
     p->slab_list[p->slabs++] = ptr;
@@ -266,6 +288,7 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     MEMCACHED_SLABS_FREE(size, id, ptr);
     p = &slabclass[id];
 
+    /* slab item回收到slabclass的slot队列 */
     it = (item *)ptr;
     it->it_flags |= ITEM_SLABBED;
     it->prev = 0;
@@ -274,6 +297,7 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     p->slots = it;
 
     p->sl_curr++;
+    /* requeusted表示slabclass占用的字节数, 只有释放slab才会降低, 在slab转为item时, size = 0 */
     p->requested -= size;
     return;
 }
@@ -373,19 +397,23 @@ static void *memory_allocate(size_t size) {
 
     if (mem_base == NULL) {
         /* We are not using a preallocated large memory chunk */
+        /* 如果不是预分配，每次从操作系统分配 */
         ret = malloc(size);
     } else {
         ret = mem_current;
 
+        /* 可用的内存耗尽 */
         if (size > mem_avail) {
             return NULL;
         }
 
         /* mem_current pointer _must_ be aligned!!! */
+        /* 内存地址对齐, 防止需要多次读取内存 */
         if (size % CHUNK_ALIGN_BYTES) {
             size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
         }
 
+        /* mem_currnet移动一个slab size的长度 */
         mem_current = ((char*)mem_current) + size;
         if (size < mem_avail) {
             mem_avail -= size;

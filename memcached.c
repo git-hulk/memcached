@@ -189,6 +189,7 @@ static void stats_init(void) {
        like 'settings.oldest_live' which act as booleans as well as
        values are now false in boolean context... */
     process_started = time(0) - ITEM_UPDATE_INTERVAL - 2;
+    /* 前缀统计项统计hashtable初始化 */
     stats_prefix_init();
 }
 
@@ -207,27 +208,41 @@ static void stats_reset(void) {
 }
 
 static void settings_init(void) {
+    /* 开启cas */
     settings.use_cas = true;
     settings.access = 0700;
+    /* 默认tcp监听端口 */
     settings.port = 11211;
+    /* 默认udp监听端口 */
     settings.udpport = 11211;
     /* By default this string should be NULL for getaddrinfo() */
     settings.inter = NULL;
     settings.maxbytes = 64 * 1024 * 1024; /* default is 64MB */
+    /* 默认最大连接数 */
     settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
     settings.verbose = 0;
     settings.oldest_live = 0;
     settings.evict_to_free = 1;       /* push old items out of cache when memory runs out */
+    /* 如果使用unix socket会用到的 */
     settings.socketpath = NULL;       /* by default, not using a unix socket */
+    /* slabclass 增长因子 */
     settings.factor = 1.25;
+    /* 最小slabclass的chunk大小 */
     settings.chunk_size = 48;         /* space for a modest key and value */
+    /* work数 */
     settings.num_threads = 4;         /* N workers */
+
     settings.num_threads_per_udp = 0;
+    /* 默认前缀分隔符 */
     settings.prefix_delimiter = ':';
+    /* 是否开启前缀统计 */
     settings.detail_enabled = 0;
+    /* 每个libevent最大的请求数 */
     settings.reqs_per_event = 20;
+    /* sync队列的最大长度 */
     settings.backlog = 1024;
     settings.binding_protocol = negotiating_prot;
+    /* slabclass 最大的item长度, 默认1M */
     settings.item_size_max = 1024 * 1024; /* The famous 1MB upper limit. */
     settings.maxconns_fast = false;
     settings.lru_crawler = false;
@@ -300,12 +315,20 @@ extern pthread_mutex_t conn_lock;
  * used for things other than connections, but that's worth it in exchange for
  * being able to directly index the conns array by FD.
  */
+/**
+ * 实际的连接数多数时候远小于最大连接数, 所以mc在实现上建立一个conn的指针数组,
+ * 而conn结构只有在真正使用的时候才会分配。
+ * 牺牲max_conns个指针数组，换取可以通过fd索引快速找到conn，是比较划算的。
+ */
 static void conn_init(void) {
     /* We're unlikely to see an FD much higher than maxconns. */
+    /* next_fd是为了取到当前打开的最大FD */
     int next_fd = dup(1);
+    /* 预留一些额外的空间给意外打开的FD */
     int headroom = 10;      /* account for extra unexpected open FDs */
     struct rlimit rl;
 
+    /* 允许最大的fd数目 */
     max_fds = settings.maxconns + headroom + next_fd;
 
     /* But if possible, get the actual highest FD we can possibly ever see. */
@@ -318,6 +341,7 @@ static void conn_init(void) {
 
     close(next_fd);
 
+    /* 创建连接数组 */
     if ((conns = calloc(max_fds, sizeof(conn *))) == NULL) {
         fprintf(stderr, "Failed to allocate connection structures\n");
         /* This is unrecoverable so bail out early. */
@@ -348,6 +372,7 @@ conn *conn_new(const int sfd, enum conn_states init_state,
     conn *c;
 
     assert(sfd >= 0 && sfd < max_fds);
+    /* 直接用fd作为索引, 可以快速定位连接 */
     c = conns[sfd];
 
     if (NULL == c) {
@@ -462,6 +487,7 @@ conn *conn_new(const int sfd, enum conn_states init_state,
 
     c->noreply = false;
 
+    /* 设置读写事件的回调 */
     event_set(&c->event, sfd, event_flags, event_handler, (void *)c);
     event_base_set(base, &c->event);
     c->ev_flags = event_flags;
@@ -5018,11 +5044,17 @@ static bool sanitycheck(void) {
 
 int main (int argc, char **argv) {
     int c;
+    /* lock memory防止内存不够时，会导致memcached产生swap而变慢 */
     bool lock_memory = false;
+    /* 后台运行 */
     bool do_daemonize = false;
+    /* 预分配, 初始化时，申请所有内存 */
     bool preallocate = false;
+    /* 是否不限制coredump文件的大小 */
     int maxcore = 0;
+    /* 启动的用户名 */
     char *username = NULL;
+    /* pid文件路径 */
     char *pid_file = NULL;
     struct passwd *pw;
     struct rlimit rlim;
@@ -5038,6 +5070,7 @@ int main (int argc, char **argv) {
     bool protocol_specified = false;
     bool tcp_specified = false;
     bool udp_specified = false;
+    /* key算hash的算法, 默认是jekins */
     enum hashfunc_type hash_type = JENKINS_HASH;
     uint32_t tocrawl;
 
@@ -5067,14 +5100,17 @@ int main (int argc, char **argv) {
         NULL
     };
 
+    /* libevent版本检测 */
     if (!sanitycheck()) {
         return EX_OSERR;
     }
 
     /* handle SIGINT */
+    /* 中断信号处理 */
     signal(SIGINT, sig_handler);
 
     /* init settings */
+    /* 初始化默认配置 */
     settings_init();
 
     /* set stderr non-buffering (for running under, say, daemontools) */
@@ -5115,6 +5151,7 @@ int main (int argc, char **argv) {
         switch (c) {
         case 'A':
             /* enables "shutdown" command */
+            /* 开启shutdown命令 */
             settings.shutdown_command = true;
             break;
 
@@ -5174,6 +5211,7 @@ int main (int argc, char **argv) {
             do_daemonize = true;
             break;
         case 'r':
+            /* 不限制coredump文件大小 */
             maxcore = 1;
             break;
         case 'R':
@@ -5406,6 +5444,7 @@ int main (int argc, char **argv) {
      * Use one workerthread to serve each UDP port if the user specified
      * multiple ports
      */
+    /* 如果是配置多个udp端口, 则每个worker线程对应一个端口, 否则多个线程对应一个端口 */
     if (settings.inter != NULL && strchr(settings.inter, ',')) {
         settings.num_threads_per_udp = 1;
     } else {
@@ -5423,6 +5462,7 @@ int main (int argc, char **argv) {
         }
     }
 
+    /* 如果tcp或者udp端口没有设置, 用对应的tcp或者udp端口来对应 */
     if (tcp_specified && !udp_specified) {
         settings.udpport = settings.port;
     } else if (udp_specified && !tcp_specified) {
@@ -5435,6 +5475,7 @@ int main (int argc, char **argv) {
          * First try raising to infinity; if that fails, try bringing
          * the soft limit to the hard.
          */
+        /* 先试着把大小设置设置为无穷大, 如果设置失败, 设置为原来的值 */
         if (getrlimit(RLIMIT_CORE, &rlim) == 0) {
             rlim_new.rlim_cur = rlim_new.rlim_max = RLIM_INFINITY;
             if (setrlimit(RLIMIT_CORE, &rlim_new)!= 0) {
@@ -5473,6 +5514,7 @@ int main (int argc, char **argv) {
     }
 
     /* lose root privileges if we have them */
+    /* 不使用root权限 */
     if (getuid() == 0 || geteuid() == 0) {
         if (username == 0 || *username == '\0') {
             fprintf(stderr, "can't run as root without the -u switch\n");
@@ -5496,6 +5538,7 @@ int main (int argc, char **argv) {
     /* daemonize if requested */
     /* if we want to ensure our ability to dump core, don't chdir to / */
     if (do_daemonize) {
+        /* 忽略hup信号 */
         if (sigignore(SIGHUP) == -1) {
             perror("Failed to ignore SIGHUP");
         }
@@ -5519,12 +5562,17 @@ int main (int argc, char **argv) {
     }
 
     /* initialize main thread libevent instance */
+    /* 主线程event base 初始化 */
     main_base = event_init();
 
     /* initialize other stuff */
+    /* 统计信息对象初始化 */
     stats_init();
+    /* 存放kv的hashtable初始化 */
     assoc_init(settings.hashpower_init);
+    /* 连接池初始化 */
     conn_init();
+    /* slab & slabclass初始化 */
     slabs_init(settings.maxbytes, settings.factor, preallocate);
 
     /*
@@ -5536,8 +5584,10 @@ int main (int argc, char **argv) {
         exit(EX_OSERR);
     }
     /* start up worker threads if MT mode */
+    /* 启动所有的worker线程 */
     thread_init(settings.num_threads, main_base);
 
+    /* kv hashtable扩容维护线程 */
     if (start_assoc_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }
@@ -5548,6 +5598,7 @@ int main (int argc, char **argv) {
     }
 
     /* Run regardless of initializing it later */
+    /* 初始化crawler的一些锁 */
     init_lru_crawler();
 
     /* initialise clock event */

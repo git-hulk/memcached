@@ -63,11 +63,13 @@ void assoc_init(const int hashtable_init) {
     if (hashtable_init) {
         hashpower = hashtable_init;
     }
+    /* 分配存储kv的hashtable数组 */
     primary_hashtable = calloc(hashsize(hashpower), sizeof(void *));
     if (! primary_hashtable) {
         fprintf(stderr, "Failed to init hashtable.\n");
         exit(EXIT_FAILURE);
     }
+    /* stats信息记录hash bucket的数目和字节数 */
     STATS_LOCK();
     stats.hash_power_level = hashpower;
     stats.hash_bytes = hashsize(hashpower) * sizeof(void *);
@@ -125,6 +127,7 @@ static item** _hashitem_before (const char *key, const size_t nkey, const uint32
 static void assoc_expand(void) {
     old_hashtable = primary_hashtable;
 
+    /* 生成新hashtable */
     primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
     if (primary_hashtable) {
         if (settings.verbose > 1)
@@ -138,6 +141,7 @@ static void assoc_expand(void) {
         stats.hash_is_expanding = 1;
         STATS_UNLOCK();
     } else {
+        /* 内存不够用, 没办法扩容 */
         primary_hashtable = old_hashtable;
         /* Bad news, but we can keep running. */
     }
@@ -208,6 +212,7 @@ static void *assoc_maintenance_thread(void *arg) {
 
         /* Lock the cache, and bulk move multiple buckets to the new
          * hash table. */
+        /* 缩容或者扩容的时候需要使用全局锁 */
         item_lock_global();
         mutex_lock(&cache_lock);
 
@@ -215,6 +220,7 @@ static void *assoc_maintenance_thread(void *arg) {
             item *it, *next;
             int bucket;
 
+            /* 从老的hashtable迁移bucket里面的item到新的hashtable */
             for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
                 next = it->h_next;
 
@@ -225,6 +231,7 @@ static void *assoc_maintenance_thread(void *arg) {
 
             old_hashtable[expand_bucket] = NULL;
 
+            /* expand_bucket == hashsize(hashpower - 1),为什么是hashpower-1 ?因为hashpower已经加过1,表示所有的bucket都已经迁移完毕 */
             expand_bucket++;
             if (expand_bucket == hashsize(hashpower - 1)) {
                 expanding = false;
@@ -243,17 +250,24 @@ static void *assoc_maintenance_thread(void *arg) {
 
         if (!expanding) {
             /* finished expanding. tell all threads to use fine-grained locks */
+            /* 完成扩容之后，需要被锁从全局锁切换到item锁 */
             switch_item_lock_type(ITEM_LOCK_GRANULAR);
+            /* 重新可以开始rebalancer */
             slabs_rebalancer_resume();
             /* We are done expanding.. just wait for next invocation */
             mutex_lock(&cache_lock);
             started_expanding = false;
+            /* 开始遥遥无期的等待maintenance_cond条件变量, 也就是下一次扩容,然后扩容线程就挂在这里了 */
+            /* 坐等assoc_insert来触发扩容的条件 */
             pthread_cond_wait(&maintenance_cond, &cache_lock);
             /* Before doing anything, tell threads to use a global lock */
             mutex_unlock(&cache_lock);
+            /* 把slabs rebalancer停掉 */
             slabs_rebalancer_pause();
+            /* 切换到全局锁的粒度, 因为老子要开始扩容了 */
             switch_item_lock_type(ITEM_LOCK_GLOBAL);
             mutex_lock(&cache_lock);
+            /* kv hashtable扩容 */
             assoc_expand();
             mutex_unlock(&cache_lock);
         }
@@ -272,6 +286,7 @@ int start_assoc_maintenance_thread() {
             hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
         }
     }
+    /* kv的hashtable迁移维护线程 */ 
     if ((ret = pthread_create(&maintenance_tid, NULL,
                               assoc_maintenance_thread, NULL)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n", strerror(ret));

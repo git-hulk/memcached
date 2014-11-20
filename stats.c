@@ -7,6 +7,10 @@
  * Author:
  *   Steven Grimm <sgrimm@facebook.com>
  */
+/*
+ * MC只有开启detail模式的时候才会用到这个根据key前缀统计模块
+ * 其他的大粒度的统计在memcached.c里面实现了
+ */
 #include "memcached.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +22,7 @@
  * fixed-size hash of prefixes; we run the prefixes through the same
  * CRC function used by the cache hashtable.
  */
+/* 根据key前缀做更加详细的统计 */
 typedef struct _prefix_stats PREFIX_STATS;
 struct _prefix_stats {
     char         *prefix;
@@ -43,6 +48,9 @@ void stats_prefix_init() {
  * Cleans up all our previously collected stats. NOTE: the stats lock is
  * assumed to be held when this is called.
  */
+/* 注释说了，调用这个函数默认stats lock已经hold住了, 那么问题来了，为什么不在函数里面做?
+ * 显然这是有原因的，我看看吧.
+ * */
 void stats_prefix_clear() {
     int i;
 
@@ -72,6 +80,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
 
     assert(key != NULL);
 
+    /* 通过分隔符来找出key中的前缀, 比如分隔符是":", key是"FOO:BAR", 那么前缀就是"FOO" */
     for (length = 0; length < nkey && key[length] != '\0'; length++) {
         if (key[length] == settings.prefix_delimiter) {
             bailout = false;
@@ -83,6 +92,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
         return NULL;
     }
 
+    /* 根据key前缀算出hash值 */
     hashval = hash(key, length) % PREFIX_HASH_SIZE;
 
     for (pfs = prefix_stats[hashval]; NULL != pfs; pfs = pfs->next) {
@@ -90,6 +100,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
             return pfs;
     }
 
+    /* 如果前缀是新的前缀，需要分配一个新的prefix_stats, 放到hash table对应的bucket */
     pfs = calloc(sizeof(PREFIX_STATS), 1);
     if (NULL == pfs) {
         perror("Can't allocate space for stats structure: calloc");
@@ -107,9 +118,11 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
     pfs->prefix[length] = '\0';      /* because strncpy() sucks */
     pfs->prefix_len = length;
 
+    /* 挂到bucket对应的链表表头 */
     pfs->next = prefix_stats[hashval];
     prefix_stats[hashval] = pfs;
 
+    /* 已有的前缀数量统计 */
     num_prefixes++;
     total_prefix_size += length;
 
@@ -119,6 +132,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
 /*
  * Records a "get" of a key.
  */
+/* 根据前缀增加get/miss计数 */
 void stats_prefix_record_get(const char *key, const size_t nkey, const bool is_hit) {
     PREFIX_STATS *pfs;
 
@@ -136,6 +150,7 @@ void stats_prefix_record_get(const char *key, const size_t nkey, const bool is_h
 /*
  * Records a "delete" of a key.
  */
+/* 根据前缀增加delete计数 */
 void stats_prefix_record_delete(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 
@@ -150,6 +165,7 @@ void stats_prefix_record_delete(const char *key, const size_t nkey) {
 /*
  * Records a "set" of a key.
  */
+/* 根据前缀增加set计数 */
 void stats_prefix_record_set(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 

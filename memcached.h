@@ -255,7 +255,9 @@ struct stats {
     unsigned int  curr_items;
     unsigned int  total_items;
     uint64_t      curr_bytes;
+    /* 表示当前的连接数 */
     unsigned int  curr_conns;
+    /* total conns应该表示整个mc实例已经接收过的连接数 */
     unsigned int  total_conns;
     uint64_t      rejected_conns;
     uint64_t      malloc_fails;
@@ -290,6 +292,7 @@ struct stats {
  * Globally accessible settings as derived from the commandline.
  */
 struct settings {
+    /* 允许使用的最大内存*/
     size_t maxbytes;
     int maxconns;
     int port;
@@ -410,21 +413,30 @@ struct conn {
     rel_time_t last_cmd_time;
     struct event event;
     short  ev_flags;
+    /* 当前的读写事件类型 */
     short  which;   /** which events were just triggered */
 
+    /* 接收的buf */
     char   *rbuf;   /** buffer to read commands into */
+    /* 当前解析到的命令的位置 */
     char   *rcurr;  /** but if we parsed some already, this is where we stopped */
+    /* 接受buf的总长度 */
     int    rsize;   /** total allocated size of rbuf */
+    /* 未解析的长度 */
     int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
 
+    /* 跟 recv buf对应 */
     char   *wbuf;
     char   *wcurr;
     int    wsize;
     int    wbytes;
     /** which state to go into after finishing current write */
+    /* 当前写完之后的动作 */
     enum conn_states  write_and_go;
+    /* 写完数据就释放 */
     void   *write_and_free; /** free this memory after finishing writing */
 
+    /* 如果是输出的是item里面的value, 使用这个 */
     char   *ritem;  /** when we read in an item's value, it goes here */
     int    rlbytes;
 
@@ -436,6 +448,7 @@ struct conn {
      * data. The data is read into ITEM_data(item) to avoid extra copying.
      */
 
+    /* 如果是set/add/replace这种命令，读取的data直接搞到item_data，可以少一次拷贝 */
     void   *item;     /* for commands set/add/replace  */
 
     /* data for the swallow state */
@@ -452,6 +465,7 @@ struct conn {
     int    msgcurr;   /* element in msglist[] being transmitted now */
     int    msgbytes;  /* number of bytes in current msg */
 
+    /* 需要输出的item链表 */
     item   **ilist;   /* list of items to write out */
     int    isize;
     item   **icurr;
@@ -482,12 +496,17 @@ struct conn {
 
     /* Binary protocol stuff */
     /* This is where the binary header goes */
+    /* 二进制协议需要使用的头部 */
     protocol_binary_request_header binary_header;
+    /* 返回的Cas值 */
     uint64_t cas; /* the cas to return */
+    /* 当前正在处理的命令类型 */
     short cmd; /* current command being processed */
     int opaque;
     int keylen;
+    /* 用来形成连接队列 */
     conn   *next;     /* Used for generating a list of conn structures */
+    /* 连接是哪个线程在处理 */
     LIBEVENT_THREAD *thread; /* Pointer to the thread object serving this connection */
 };
 

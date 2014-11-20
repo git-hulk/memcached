@@ -62,6 +62,7 @@ static unsigned int item_lock_hashpower;
 /* this lock is temporarily engaged during a hash table expansion */
 static pthread_mutex_t item_global_lock;
 /* thread-specific variable for deeply finding the item lock type */
+/* 用来识别当前线程锁是local还是global */
 static pthread_key_t item_lock_type_key;
 
 static LIBEVENT_DISPATCHER_THREAD dispatcher_thread;
@@ -160,6 +161,7 @@ void item_unlock(uint32_t hv) {
 
 static void wait_for_thread_registration(int nthreads) {
     while (init_count < nthreads) {
+        /* 等待所有的线程都启动起来 */
         pthread_cond_wait(&init_cond, &init_lock);
     }
 }
@@ -189,6 +191,7 @@ void switch_item_lock_type(enum item_lock_types type) {
     }
 
     pthread_mutex_lock(&init_lock);
+    /* 通知所有的worker线程切换锁粒度 */
     init_count = 0;
     for (i = 0; i < settings.num_threads; i++) {
         if (write(threads[i].notify_send_fd, buf, 1) != 1) {
@@ -196,6 +199,7 @@ void switch_item_lock_type(enum item_lock_types type) {
             /* TODO: This is a fatal problem. Can it ever happen temporarily? */
         }
     }
+    /* 需要等待所有的worker线程切换完毕 */
     wait_for_thread_registration(settings.num_threads);
     pthread_mutex_unlock(&init_lock);
 }
@@ -328,6 +332,7 @@ void accept_new_conns(const bool do_accept) {
  * Set up a thread's information.
  */
 static void setup_thread(LIBEVENT_THREAD *me) {
+    /* 启动一个libevent实例 */
     me->base = event_init();
     if (! me->base) {
         fprintf(stderr, "Can't allocate event base\n");
@@ -335,6 +340,7 @@ static void setup_thread(LIBEVENT_THREAD *me) {
     }
 
     /* Listen for notifications from other threads */
+    /* 设置专门接受主线程管道消息的fd, 当有连接到来的时候，主线程会通知线程去获取一个连接来处理 */
     event_set(&me->notify_event, me->notify_receive_fd,
               EV_READ | EV_PERSIST, thread_libevent_process, me);
     event_base_set(me->base, &me->notify_event);
@@ -344,18 +350,22 @@ static void setup_thread(LIBEVENT_THREAD *me) {
         exit(1);
     }
 
+    /* 线程已接受的连接队列 */
     me->new_conn_queue = malloc(sizeof(struct conn_queue));
     if (me->new_conn_queue == NULL) {
         perror("Failed to allocate memory for connection queue");
         exit(EXIT_FAILURE);
     }
+    /* 初始化连接队列 */
     cq_init(me->new_conn_queue);
 
+    /* 初始化线程自身统计的锁 */
     if (pthread_mutex_init(&me->stats.mutex, NULL) != 0) {
         perror("Failed to initialize mutex");
         exit(EXIT_FAILURE);
     }
 
+    /* 创建一个名字为"suffix"，object长度为SUFFIX_SIZE的cache*/
     me->suffix_cache = cache_create("suffix", SUFFIX_SIZE, sizeof(char*),
                                     NULL, NULL);
     if (me->suffix_cache == NULL) {
@@ -378,9 +388,11 @@ static void *worker_libevent(void *arg) {
      * this could be unnecessary if we pass the conn *c struct through
      * all item_lock calls...
      */
+    /* worker线程默认锁级别是item，只有在kv的hashtable扩容的时候才会转为global */
     me->item_lock_type = ITEM_LOCK_GRANULAR;
     pthread_setspecific(item_lock_type_key, &me->item_lock_type);
 
+    /* 线程已经启动消息注册 */
     register_thread_initialized();
 
     event_base_loop(me->base, 0);
@@ -401,6 +413,9 @@ static void thread_libevent_process(int fd, short which, void *arg) {
         if (settings.verbose > 0)
             fprintf(stderr, "Can't read from libevent pipe\n");
 
+    /**
+     * 主线程发送'c' 表示新连接到来, 'l' 表示item级别的锁, 'g' 表示全局锁
+     */
     switch (buf[0]) {
     case 'c':
     item = cq_pop(me->new_conn_queue);
@@ -422,15 +437,18 @@ static void thread_libevent_process(int fd, short which, void *arg) {
         } else {
             c->thread = me;
         }
+        /* 释放connection queue item,已经有connection来代替 */
         cqi_free(item);
     }
         break;
     /* we were told to flip the lock type and report in */
     case 'l':
+    /* 切换到item的锁粒度 */
     me->item_lock_type = ITEM_LOCK_GRANULAR;
     register_thread_initialized();
         break;
     case 'g':
+    /* 切换到global的锁粒度 */
     me->item_lock_type = ITEM_LOCK_GLOBAL;
     register_thread_initialized();
         break;
@@ -785,12 +803,16 @@ void thread_init(int nthreads, struct event_base *main_base) {
     pthread_mutex_init(&cache_lock, NULL);
     pthread_mutex_init(&stats_lock, NULL);
 
+    /* init lock让父线程等待所有的子线程都启动完毕 */
     pthread_mutex_init(&init_lock, NULL);
     pthread_cond_init(&init_cond, NULL);
 
     pthread_mutex_init(&cqi_freelist_lock, NULL);
     cqi_freelist = NULL;
 
+    /* mc的item锁是放在hashtable, 不同key通过hash同一个锁的bucket, 会公共有竞争.
+     * 这个锁的hashtable大小是根据worker线程数来确定, 因为线程越多冲突可能会越多。
+     * */
     /* Want a wide lock table, but don't waste memory */
     if (nthreads < 3) {
         power = 10;
@@ -836,8 +858,10 @@ void thread_init(int nthreads, struct event_base *main_base) {
         threads[i].notify_receive_fd = fds[0];
         threads[i].notify_send_fd = fds[1];
 
+        /* 初始化worker线程相关事件 */
         setup_thread(&threads[i]);
         /* Reserve three fds for the libevent base, and two for the pipe */
+        /* libevent实例占用3个Fd, pipe占用2个 */
         stats.reserved_fds += 5;
     }
 
