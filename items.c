@@ -431,6 +431,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
 void item_stats_evictions(uint64_t *evicted) {
     int i;
     mutex_lock(&cache_lock);
+    /* 这里为什么是cache lock */
     for (i = 0; i < LARGEST_ID; i++) {
         evicted[i] = itemstats[i].evicted;
     }

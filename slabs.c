@@ -484,10 +484,12 @@ static int slab_rebalance_start(void) {
 
     s_cls = &slabclass[slab_rebal.s_clsid];
 
+    /* slab list扩容 */
     if (!grow_slab_list(slab_rebal.d_clsid)) {
         no_go = -1;
     }
 
+    /* source slabclass本身的Slab过少 */
     if (s_cls->slabs < 2)
         no_go = -3;
 
@@ -515,6 +517,7 @@ static int slab_rebalance_start(void) {
     pthread_mutex_unlock(&slabs_lock);
     pthread_mutex_unlock(&cache_lock);
 
+    /* 正在迁移slab */
     STATS_LOCK();
     stats.slab_reassign_running = true;
     STATS_UNLOCK();
@@ -554,6 +557,7 @@ static int slab_rebalance_move(void) {
             } else {
                 refcount = refcount_incr(&it->refcount);
                 if (refcount == 1) { /* item is unlinked, unused */
+                    /* 如果item未使用, 直接从item free list里面移除 */
                     if (it->it_flags & ITEM_SLABBED) {
                         /* remove from slab freelist */
                         if (s_cls->slots == it) {
@@ -581,6 +585,7 @@ static int slab_rebalance_move(void) {
                         fprintf(stderr, "Slab reassign hit a busy item: refcount: %d (%d -> %d)\n",
                             it->refcount, slab_rebal.s_clsid, slab_rebal.d_clsid);
                     }
+                    /* refcount > 1, 说明item被多处引用, 后续可以再重试 */
                     status = MOVE_BUSY;
                 }
                 item_trylock_unlock(hold_lock);
@@ -594,6 +599,7 @@ static int slab_rebalance_move(void) {
                 it->slabs_clsid = 255;
                 break;
             case MOVE_BUSY:
+                /* 当前还无法删除,就将刚才加上的引用计数减掉 */
                 refcount_decr(&it->refcount);
             case MOVE_LOCKED:
                 slab_rebal.busy_items++;
@@ -603,6 +609,7 @@ static int slab_rebalance_move(void) {
                 break;
         }
 
+        /* 继续下一个item */
         slab_rebal.slab_pos = (char *)slab_rebal.slab_pos + s_cls->size;
         if (slab_rebal.slab_pos >= slab_rebal.slab_end)
             break;
@@ -610,6 +617,7 @@ static int slab_rebalance_move(void) {
 
     if (slab_rebal.slab_pos >= slab_rebal.slab_end) {
         /* Some items were busy, start again from the top */
+        /* 中间有跳过繁忙的item, 重新试过 */
         if (slab_rebal.busy_items) {
             slab_rebal.slab_pos = slab_rebal.slab_start;
             slab_rebal.busy_items = 0;
@@ -635,14 +643,17 @@ static void slab_rebalance_finish(void) {
     d_cls   = &slabclass[slab_rebal.d_clsid];
 
     /* At this point the stolen slab is completely clear */
+    /* 把最后一个slab放到slabs[0] */
     s_cls->slab_list[s_cls->killing - 1] =
         s_cls->slab_list[s_cls->slabs - 1];
     s_cls->slabs--;
     s_cls->killing = 0;
 
+    /* 把腾出来的slab设置为'\0' */
     memset(slab_rebal.slab_start, 0, (size_t)settings.item_size_max);
 
     d_cls->slab_list[d_cls->slabs++] = slab_rebal.slab_start;
+    /* 腾出来的slab放到dest slabclass里面 */
     split_slab_page_into_freelist(slab_rebal.slab_start,
         slab_rebal.d_clsid);
 
@@ -694,23 +705,29 @@ static int slab_automove_decision(int *src, int *dst) {
         return 0;
     }
 
+    /* 获取当前的剔除率 */
     item_stats_evictions(evicted_new);
     pthread_mutex_lock(&cache_lock);
     for (i = POWER_SMALLEST; i < power_largest; i++) {
+        /* slabclass 占用的slab数 */
         total_pages[i] = slabclass[i].slabs;
     }
     pthread_mutex_unlock(&cache_lock);
 
     /* Find a candidate source; something with zero evicts 3+ times */
+    /* 选出合适踢出的slab候选, 3次以上选举都没有踢出 */
     for (i = POWER_SMALLEST; i < power_largest; i++) {
+        /* 距上次到这次的剔除数 */
         evicted_diff = evicted_new[i] - evicted_old[i];
         if (evicted_diff == 0 && total_pages[i] > 2) {
             slab_zeroes[i]++;
+            /* source还没选中且当前的slabclass经过三次对比都没有剔除 */
             if (source == 0 && slab_zeroes[i] >= 3)
                 source = i;
         } else {
             slab_zeroes[i] = 0;
             if (evicted_diff > evicted_max) {
+                /* 对比前后两次的evict数, 选择剔除率最高的 */
                 evicted_max = evicted_diff;
                 highest_slab = i;
             }
@@ -719,6 +736,7 @@ static int slab_automove_decision(int *src, int *dst) {
     }
 
     /* Pick a valid destination */
+    /* 选择dest slabclass */
     if (slab_winner != 0 && slab_winner == highest_slab) {
         slab_wins++;
         if (slab_wins >= 3)
@@ -780,10 +798,12 @@ static void *slab_rebalance_thread(void *arg) {
         }
 
         if (slab_rebal.done) {
+            /* item迁移结束 */
             slab_rebalance_finish();
         } else if (was_busy) {
             /* Stuck waiting for some items to unlock, so slow down a bit
              * to give them a chance to free up */
+            /* 有一些item当前无法删除, 继续等待 */
             usleep(50);
         }
 
@@ -832,12 +852,15 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
         dst < POWER_SMALLEST || dst > power_largest)
         return REASSIGN_BADCLASS;
 
+    /* 老子就只有两个slab了，别他么给我拿走了 */
     if (slabclass[src].slabs < 2)
         return REASSIGN_NOSPARE;
 
+    /* 设置迁移的source slabclass和dest slabclass */
     slab_rebal.s_clsid = src;
     slab_rebal.d_clsid = dst;
 
+    /* 给reblacee线程发送信号, 可以开始做迁移了 */
     slab_rebalance_signal = 1;
     pthread_cond_signal(&slab_rebalance_cond);
 
@@ -884,11 +907,13 @@ int start_slab_maintenance_thread(void) {
     }
     pthread_mutex_init(&slabs_rebalance_lock, NULL);
 
+    /* 创建维护线程, 检查是否有slabclass剔除率过高,有的话通知reblance线程进行迁移 */
     if ((ret = pthread_create(&maintenance_tid, NULL,
                               slab_maintenance_thread, NULL)) != 0) {
         fprintf(stderr, "Can't create slab maint thread: %s\n", strerror(ret));
         return -1;
     }
+    /* 接收到迁移的信号之后，开始做迁移 */
     if ((ret = pthread_create(&rebalance_tid, NULL,
                               slab_rebalance_thread, NULL)) != 0) {
         fprintf(stderr, "Can't create rebal thread: %s\n", strerror(ret));
